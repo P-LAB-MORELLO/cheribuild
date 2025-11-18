@@ -759,6 +759,14 @@ class BuildMorelloLLVM(BuildLLVMMonoRepoBase):
             ),
         ]
         return [x + "-" for x in triples]
+    
+    # Add these lines:
+    @classmethod
+    def setup_config_options(cls, **kwargs):
+        super().setup_config_options(**kwargs)
+        # Add clangd to the default if not already present
+        if "clangd" not in cls.included_projects.default:
+            cls.included_projects.default = cls.included_projects.default + ["clangd"]
 
     def configure(self, **kwargs):
         # Unless we set the default target triple, CMake will not be able to determine the compiler ID.
