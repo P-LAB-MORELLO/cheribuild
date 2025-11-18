@@ -32,6 +32,7 @@ import re
 from .crosscompileproject import CrossCompileAutotoolsProject, DefaultInstallDir, GitRepository, MakeCommandKind
 from ...processutils import commandline_to_str
 
+from pathlib import Path
 
 class BuildNginx(CrossCompileAutotoolsProject):
     repository = GitRepository("https://github.com/CTSRD-CHERI/nginx.git")
@@ -64,18 +65,32 @@ class BuildNginx(CrossCompileAutotoolsProject):
         self.make_args.add_flags("-f", self.build_dir / "Makefile")
         self.cross_warning_flags += ["-Wno-error=cheri-capability-misuse", "-Wno-error=sign-compare"]
 
+        lwip_base = Path.home() / "projects/E1000Lwip/nginx_deps"
+        self.COMMON_FLAGS.append("-DNGX_USE_LWIP=1")
+        self.COMMON_FLAGS.append("-I" + str(lwip_base / "install/include"))
+        self.LDFLAGS.append(str(lwip_base / "lwip_build/liblwip.a"))
+        self.LDFLAGS.append("-lpthread")
+
     def install(self, **kwargs):
         # We have to run make inside the source directory
         self.run_make_install(cwd=self.source_dir)
-        self.install_file(self.source_dir / "fetchbench", self.real_install_root_dir / "sbin/fetchbench")
-        # install the benchmark script
-        benchmark = self.read_file(self.source_dir / "nginx-benchmark.sh")
-        if not self.compiling_for_host():
-            benchmark = re.sub(r"NGINX=.*", 'NGINX="' + str(self.install_prefix / "sbin/nginx") + '"', benchmark)
-            benchmark = re.sub(
-                r"FETCHBENCH=.*", 'FETCHBENCH="' + str(self.install_prefix / "sbin/fetchbench") + '"', benchmark
-            )
-        self.write_file(self.real_install_root_dir / "nginx-benchmark.sh", benchmark, overwrite=True, mode=0o755)
+        # Only install fetchbench if it exists (may not be in all branches)
+
+         # Only install fetchbench if it exists (may not be in all branches)
+        fetchbench = self.source_dir / "fetchbench"
+        if fetchbench.exists():
+            self.install_file(fetchbench, self.real_install_root_dir / "sbin/fetchbench")
+        
+        # Install the benchmark script if it exists
+        benchmark_script = self.source_dir / "nginx-benchmark.sh"
+        if benchmark_script.exists():
+            benchmark = self.read_file(benchmark_script)
+            if not self.compiling_for_host():
+                benchmark = re.sub(r"NGINX=.*", 'NGINX="' + str(self.install_prefix / "sbin/nginx") + '"', benchmark)
+                benchmark = re.sub(
+                    r"FETCHBENCH=.*", 'FETCHBENCH="' + str(self.install_prefix / "sbin/fetchbench") + '"', benchmark
+                )
+            self.write_file(self.real_install_root_dir / "nginx-benchmark.sh", benchmark, overwrite=True, mode=0o755)
 
     def needs_configure(self):
         return not (self.build_dir / "Makefile").exists()
@@ -96,17 +111,22 @@ class BuildNginx(CrossCompileAutotoolsProject):
             ]
         )
         if not self.compiling_for_host():
-            self.LDFLAGS.append("-v")
+            lwip_base = Path.home() / "projects/E1000Lwip/nginx_deps"
+            lwip_lib = str(lwip_base / "lwip_build/liblwip.a")
+            
+            # Build the ld-opt string directly with lwIP library appended
+            ld_opt_str = self.commandline_to_str(self.default_ldflags) + " -v " + lwip_lib + " -lpthread"
+
             self.configure_args.extend(
                 [
-                    "--crossbuild=FreeBSD:12.0-CURRENT:mips",
-                    "--with-cc-opt=" + commandline_to_str(self.default_compiler_flags()),
-                    "--with-ld-opt=" + commandline_to_str(self.default_ldflags),
-                    "--sysroot=" + str(self.sdk_sysroot),
+                    "--crossbuild=FreeBSD:13.0-CURRENT:aarch64",
+                    "--with-cc-opt=" + self.commandline_to_str(self.default_compiler_flags),
+                    "--with-ld-opt=" + ld_opt_str,
                 ]
             )
-            self.configure_environment["CC_TEST_FLAGS"] = commandline_to_str(self.default_compiler_flags())
-            self.configure_environment["NGX_TEST_LD_OPT"] = commandline_to_str(self.default_ldflags)
+
+            self.configure_environment["CC_TEST_FLAGS"] = self.commandline_to_str(self.default_compiler_flags())
+            self.configure_environment["NGX_TEST_LD_OPT"] = self.commandline_to_str(self.default_ldflags)
             self.configure_environment["NGX_SIZEOF_int"] = "4"
             self.configure_environment["NGX_SIZEOF_sig_atomic_t"] = "4"  # on mips it is an int
             self.configure_environment["NGX_SIZEOF_long"] = "8"
@@ -120,6 +140,12 @@ class BuildNginx(CrossCompileAutotoolsProject):
             self.configure_environment["NGX_HAVE_MAP_ANON"] = "yes"
             self.configure_environment["NGX_HAVE_POSIX_SEM"] = "yes"
         super().configure(cwd=self.source_dir)
+
+        # Add the required defines to ngx_auto_config.h
+        config_file = self.build_dir / "ngx_auto_config.h"
+        with open(config_file, "a") as f:
+            f.write("#define NGX_HAVE_GCC_ATOMIC  1\n")
+            f.write("#define NGX_HAVE_MAP_ANON  1\n")
 
     def compile(self, **kwargs):
         # The cwd for make needs to be the source dir and it expects an empty target name
